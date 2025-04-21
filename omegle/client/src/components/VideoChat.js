@@ -295,4 +295,4 @@ const VideoChat = ({ partnerId, onNext, socket }) => {
   );
 };
 
-export default VideoChat; 
+export default VideoChat;

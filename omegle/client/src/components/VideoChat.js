@@ -1083,10 +1083,11 @@
 // };
 
 // export default VideoChat;
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import Peer from 'simple-peer';
 
 const VideoChat = ({ partnerId, onNext, socket }) => {
+  // State definitions
   const [stream, setStream] = useState(null);
   const [peer, setPeer] = useState(null);
   const [isStreamReady, setIsStreamReady] = useState(false);
@@ -1097,15 +1098,15 @@ const VideoChat = ({ partnerId, onNext, socket }) => {
   const [isWaiting, setIsWaiting] = useState(true);
   const [isChatExpanded, setIsChatExpanded] = useState(false);
   const [isCameraLoading, setIsCameraLoading] = useState(true);
-  const [isStreamRetrying, setIsStreamRetrying] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState('initializing');
-  const [connectionTimer, setConnectionTimer] = useState(null);
 
+  // Refs
   const localVideoRef = useRef();
   const remoteVideoRef = useRef();
   const messagesEndRef = useRef();
   const streamRetryCount = useRef(0);
   const maxStreamRetries = 3;
+  const connectionTimerRef = useRef(null);
 
   // Clear error message after 5 seconds
   useEffect(() => {
@@ -1115,8 +1116,8 @@ const VideoChat = ({ partnerId, onNext, socket }) => {
     }
   }, [error]);
 
-  // Initialize camera and microphone stream
-  const initStream = useCallback(async () => {
+  // Initialize camera and microphone
+  const initStream = async () => {
     try {
       setIsCameraLoading(true);
       setConnectionStatus('connecting-camera');
@@ -1155,14 +1156,12 @@ const VideoChat = ({ partnerId, onNext, socket }) => {
       console.error('Media access error:', err);
       setIsCameraLoading(false);
       
-      if (streamRetryCount.current < maxStreamRetries && !isStreamRetrying) {
+      if (streamRetryCount.current < maxStreamRetries) {
         streamRetryCount.current += 1;
-        setIsStreamRetrying(true);
         setError(`Camera/microphone access failed. Retrying (${streamRetryCount.current}/${maxStreamRetries})...`);
         
         // Retry after a short delay
         setTimeout(() => {
-          setIsStreamRetrying(false);
           initStream();
         }, 2000);
       } else {
@@ -1178,21 +1177,34 @@ const VideoChat = ({ partnerId, onNext, socket }) => {
         setConnectionStatus('error');
       }
     }
-  }, [stream, isStreamRetrying]);
+  };
 
   // Initialize stream on component mount
   useEffect(() => {
-    let mounted = true;
-    
     initStream();
     
     return () => {
-      mounted = false;
+      if (stream) {
+        stream.getTracks().forEach(track => track.stop());
+      }
+      
+      // Clear any pending timers
+      if (connectionTimerRef.current) {
+        clearTimeout(connectionTimerRef.current);
+      }
+    };
+  }, []);
+
+  // Handle stream dependency separately to avoid the initialization loop
+  useEffect(() => {
+    if (!stream) return;
+    
+    return () => {
       if (stream) {
         stream.getTracks().forEach(track => track.stop());
       }
     };
-  }, [initStream]);
+  }, [stream]);
 
   // Create peer connection when partner is found and stream is ready
   useEffect(() => {
@@ -1202,7 +1214,11 @@ const VideoChat = ({ partnerId, onNext, socket }) => {
     setConnectionStatus('connecting-peer');
     
     // Set a connection timeout
-    const connectionTimeoutId = setTimeout(() => {
+    if (connectionTimerRef.current) {
+      clearTimeout(connectionTimerRef.current);
+    }
+    
+    connectionTimerRef.current = setTimeout(() => {
       if (!isConnected) {
         setError('Connection taking too long. Will try a new partner soon.');
         setConnectionStatus('timeout');
@@ -1211,8 +1227,6 @@ const VideoChat = ({ partnerId, onNext, socket }) => {
         }, 3000);
       }
     }, 15000);
-    
-    setConnectionTimer(connectionTimeoutId);
 
     // Create a new peer connection
     const newPeer = new Peer({ 
@@ -1222,8 +1236,7 @@ const VideoChat = ({ partnerId, onNext, socket }) => {
       config: {
         iceServers: [
           { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:stun1.l.google.com:19302' },
-          { urls: 'stun:stun2.l.google.com:19302' }
+          { urls: 'stun:stun1.l.google.com:19302' }
         ]
       }
     });
@@ -1236,7 +1249,6 @@ const VideoChat = ({ partnerId, onNext, socket }) => {
       if (remoteVideoRef.current) {
         remoteVideoRef.current.srcObject = remoteStream;
         
-        // Handle remote video playback
         remoteVideoRef.current.play()
           .then(() => {
             setConnectionStatus('connected');
@@ -1251,7 +1263,9 @@ const VideoChat = ({ partnerId, onNext, socket }) => {
     newPeer.on('connect', () => {
       setIsConnected(true);
       setConnectionStatus('connected');
-      clearTimeout(connectionTimeoutId);
+      if (connectionTimerRef.current) {
+        clearTimeout(connectionTimerRef.current);
+      }
     });
     
     newPeer.on('error', (err) => {
@@ -1268,13 +1282,15 @@ const VideoChat = ({ partnerId, onNext, socket }) => {
     setPeer(newPeer);
 
     return () => {
-      clearTimeout(connectionTimeoutId);
+      if (connectionTimerRef.current) {
+        clearTimeout(connectionTimerRef.current);
+      }
       
       if (newPeer) {
         newPeer.destroy();
       }
     };
-  }, [stream, partnerId, socket, isStreamReady, handleNext]);
+  }, [stream, partnerId, isStreamReady]);
 
   // Handle incoming signal from partner
   useEffect(() => {
@@ -1319,7 +1335,6 @@ const VideoChat = ({ partnerId, onNext, socket }) => {
       setIsWaiting(true);
       setConnectionStatus('waiting');
       
-      // Clear messages when partner leaves
       setMessages([]);
     };
 
@@ -1337,11 +1352,12 @@ const VideoChat = ({ partnerId, onNext, socket }) => {
     return () => socket.off('error', handleSocketError);
   }, [socket]);
 
-  // Create a memoized version of handleNext to avoid dependency loop
-  const handleNext = useCallback(() => {
+  // Handle next button click
+  const handleNext = () => {
     // Clear connection timeout if it exists
-    if (connectionTimer) {
-      clearTimeout(connectionTimer);
+    if (connectionTimerRef.current) {
+      clearTimeout(connectionTimerRef.current);
+      connectionTimerRef.current = null;
     }
     
     setIsWaiting(true);
@@ -1368,7 +1384,7 @@ const VideoChat = ({ partnerId, onNext, socket }) => {
       setIsStreamReady(false);
       initStream();
     }, 1000);
-  }, [peer, stream, connectionTimer, onNext, initStream]);
+  };
 
   // Send a chat message
   const sendMessage = (e) => {
@@ -1391,25 +1407,31 @@ const VideoChat = ({ partnerId, onNext, socket }) => {
   // Handle manual camera restart
   const handleRestartCamera = () => {
     setError('Restarting camera...');
-    initStream();
+    
+    // Stop current stream
+    if (stream) {
+      stream.getTracks().forEach(track => track.stop());
+      setStream(null);
+    }
+    
+    // Delay before restarting to ensure cleanup
+    setTimeout(() => {
+      initStream();
+    }, 500);
   };
 
   // Handle manual click on video to try autoplay
-  const handleVideoClick = async () => {
+  const handleVideoClick = () => {
     if (localVideoRef.current && localVideoRef.current.paused) {
-      try {
-        await localVideoRef.current.play();
-      } catch (err) {
+      localVideoRef.current.play().catch(err => {
         console.error('Manual play failed:', err);
-      }
+      });
     }
     
     if (remoteVideoRef.current && remoteVideoRef.current.paused) {
-      try {
-        await remoteVideoRef.current.play();
-      } catch (err) {
+      remoteVideoRef.current.play().catch(err => {
         console.error('Manual remote play failed:', err);
-      }
+      });
     }
   };
 

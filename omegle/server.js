@@ -252,6 +252,7 @@
 // server.listen(PORT, () => {
 //   console.log(`Server running on port ${PORT}`);
 // });
+// server.js
 const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
@@ -260,6 +261,7 @@ require('dotenv').config();
 
 const app = express();
 const server = http.createServer(app);
+
 const io = socketIo(server, {
   cors: {
     origin: "https://omitv2.onrender.com",
@@ -267,310 +269,197 @@ const io = socketIo(server, {
   }
 });
 
-// Middleware
 app.use(cors());
 app.use(express.json());
 
-// Store users waiting for text or video chat
 const waitingUsers = {
   text: new Set(),
   video: new Set()
 };
 
-// Store currently active pairs with timestamps
 const activeConnections = new Map();
-
-// Matching timeout (in milliseconds)
 const MATCHING_TIMEOUT = 5000;
 const CONNECTION_HEARTBEAT = 30000;
 
-// Function to find and match a partner
-function matchPartner(socket, chatType) {
-  // Don't match if already in an active connection
-  if (activeConnections.has(socket.id)) {
-    return false;
-  }
+// Match two users together
+function tryMatch(socket, type) {
+  if (activeConnections.has(socket.id)) return;
 
-  const users = Array.from(waitingUsers[chatType]);
-  
-  // Filter out disconnected sockets and the current user
-  const availablePartners = users.filter(id => {
-    // Check if user is still connected to socket
-    const partnerSocket = io.sockets.sockets.get(id);
-    return id !== socket.id && 
-           partnerSocket && 
-           !activeConnections.has(id);
+  const queue = Array.from(waitingUsers[type]);
+  const partnerId = queue.find(id => id !== socket.id && !activeConnections.has(id));
+
+  if (!partnerId) return;
+
+  const partnerSocket = io.sockets.sockets.get(partnerId);
+  if (!partnerSocket) return;
+
+  // Cleanup from queue
+  waitingUsers[type].delete(socket.id);
+  waitingUsers[type].delete(partnerId);
+
+  const matchId = `${socket.id}_${partnerId}_${Date.now()}`;
+
+  // Store both sides
+  activeConnections.set(socket.id, {
+    partnerId,
+    type,
+    matchId,
+    lastActivity: Date.now()
   });
 
-  if (availablePartners.length === 0) {
-    return false;
-  }
-
-  // Pick a random partner to avoid always matching the same pairs
-  const randomIndex = Math.floor(Math.random() * availablePartners.length);
-  const availablePartner = availablePartners[randomIndex];
-
-  // Remove from waiting queue
-  waitingUsers[chatType].delete(socket.id);
-  waitingUsers[chatType].delete(availablePartner);
-
-  // Save active connection with timestamp
-  const connectionData = {
-    partnerId: availablePartner,
-    chatType,
-    timestamp: Date.now(),
-    lastActivity: Date.now()
-  };
-  
-  const partnerConnectionData = {
+  activeConnections.set(partnerId, {
     partnerId: socket.id,
-    chatType,
-    timestamp: Date.now(),
+    type,
+    matchId,
     lastActivity: Date.now()
-  };
-  
-  activeConnections.set(socket.id, connectionData);
-  activeConnections.set(availablePartner, partnerConnectionData);
+  });
 
-  // Notify both
-  io.to(socket.id).emit('partnerFound', { partnerId: availablePartner, chatType });
-  io.to(availablePartner).emit('partnerFound', { partnerId: socket.id, chatType });
+  // Send event to start WebRTC handshake
+  io.to(socket.id).emit('partnerFound', { partnerId, chatType: type, matchId });
+  io.to(partnerId).emit('partnerFound', { partnerId: socket.id, chatType: type, matchId });
 
-  console.log(`Matched users: ${socket.id} <--> ${availablePartner}`);
-  return true;
+  console.log(`Matched: ${socket.id} <--> ${partnerId}`);
 }
 
-// Function to check if a socket is still valid
-function isSocketValid(socketId) {
-  const socket = io.sockets.sockets.get(socketId);
-  return !!socket;
+function isConnected(id) {
+  return !!io.sockets.sockets.get(id);
 }
 
-// Periodically clean up stale connections
+// Clean stale every 10s
 setInterval(() => {
   const now = Date.now();
-  
-  // Clean up stale active connections
-  for (const [socketId, connection] of activeConnections.entries()) {
-    // If connection is over 2 minutes old with no activity, or socket is invalid
-    if (!isSocketValid(socketId) || 
-        !isSocketValid(connection.partnerId) ||
-        now - connection.lastActivity > CONNECTION_HEARTBEAT) {
-      
-      console.log(`Cleaning up stale connection: ${socketId} <--> ${connection.partnerId}`);
-      
-      // Notify partner if they're still connected
-      if (isSocketValid(connection.partnerId)) {
-        io.to(connection.partnerId).emit('partnerLeft');
-        // Remove partner's connection too
-        activeConnections.delete(connection.partnerId);
+
+  for (const [id, conn] of activeConnections.entries()) {
+    if (!isConnected(id) || !isConnected(conn.partnerId) ||
+        now - conn.lastActivity > CONNECTION_HEARTBEAT) {
+
+      const partnerId = conn.partnerId;
+
+      activeConnections.delete(id);
+      activeConnections.delete(partnerId);
+
+      if (isConnected(partnerId)) {
+        io.to(partnerId).emit('partnerLeft');
+        waitingUsers[conn.type].add(partnerId);
+        const partnerSocket = io.sockets.sockets.get(partnerId);
+        if (partnerSocket) setTimeout(() => tryMatch(partnerSocket, conn.type), 1000);
       }
-      
-      activeConnections.delete(socketId);
+
+      console.log(`Cleaned stale connection: ${id} <--> ${partnerId}`);
     }
   }
-  
-  // Clean up waiting users who are no longer connected
-  for (const chatType in waitingUsers) {
-    for (const userId of waitingUsers[chatType]) {
-      if (!isSocketValid(userId)) {
-        waitingUsers[chatType].delete(userId);
-        console.log(`Removed disconnected user from waiting queue: ${userId}`);
+
+  // Remove disconnected users from queue
+  for (const type in waitingUsers) {
+    for (const id of waitingUsers[type]) {
+      if (!isConnected(id)) {
+        waitingUsers[type].delete(id);
+        console.log(`Removed stale waiting: ${id}`);
       }
     }
   }
 }, 10000);
 
-// Socket.IO logic
+// Handle connections
 io.on('connection', (socket) => {
-  console.log('New user connected:', socket.id);
-  
-  // Handle heartbeat to keep track of active connections
+  console.log("User connected:", socket.id);
+
   socket.on('heartbeat', () => {
-    const connection = activeConnections.get(socket.id);
-    if (connection) {
-      connection.lastActivity = Date.now();
-    }
+    const conn = activeConnections.get(socket.id);
+    if (conn) conn.lastActivity = Date.now();
   });
 
   socket.on('findPartner', ({ chatType }) => {
-    console.log(`User ${socket.id} searching for ${chatType} partner`);
-    
-    // Clean up any existing connections first
-    cleanupUserConnections(socket.id);
-    
-    // Don't add twice
-    if (waitingUsers[chatType].has(socket.id)) {
-      return;
+    cleanup(socket.id);
+
+    if (!waitingUsers[chatType].has(socket.id)) {
+      waitingUsers[chatType].add(socket.id);
     }
-    
-    // Add to waiting queue
-    waitingUsers[chatType].add(socket.id);
-    
-    // Try immediate matching
-    const matched = matchPartner(socket, chatType);
-    
-    // If not matched immediately, set a timeout to try again
-    if (!matched) {
-      setTimeout(() => {
-        // If still waiting, try matching again
-        if (waitingUsers[chatType].has(socket.id) && !activeConnections.has(socket.id)) {
-          console.log(`Retrying match for user ${socket.id}`);
-          matchPartner(socket, chatType);
-        }
-      }, MATCHING_TIMEOUT);
-    }
+
+    tryMatch(socket, chatType);
+
+    setTimeout(() => {
+      if (waitingUsers[chatType].has(socket.id) && !activeConnections.has(socket.id)) {
+        tryMatch(socket, chatType);
+      }
+    }, MATCHING_TIMEOUT);
   });
 
   socket.on('message', ({ partnerId, message }) => {
-    const connection = activeConnections.get(socket.id);
-    
-    // Only forward if connection is valid and to the correct partner
-    if (connection && connection.partnerId === partnerId) {
-      connection.lastActivity = Date.now();
-      io.to(partnerId).emit('message', { message, senderId: socket.id });
-      
-      // Update partner's activity timestamp too
-      const partnerConnection = activeConnections.get(partnerId);
-      if (partnerConnection) {
-        partnerConnection.lastActivity = Date.now();
-      }
+    const conn = activeConnections.get(socket.id);
+    if (conn && conn.partnerId === partnerId) {
+      conn.lastActivity = Date.now();
+      io.to(partnerId).emit('message', { senderId: socket.id, message });
+
+      const partnerConn = activeConnections.get(partnerId);
+      if (partnerConn) partnerConn.lastActivity = Date.now();
     }
   });
 
   socket.on('signal', ({ partnerId, signal }) => {
-    const connection = activeConnections.get(socket.id);
-    
-    // Only forward if connection is valid and to the correct partner
-    if (connection && connection.partnerId === partnerId) {
-      connection.lastActivity = Date.now();
-      io.to(partnerId).emit('signal', { signal, senderId: socket.id });
-      
-      // Update partner's activity timestamp too
-      const partnerConnection = activeConnections.get(partnerId);
-      if (partnerConnection) {
-        partnerConnection.lastActivity = Date.now();
-      }
+    const conn = activeConnections.get(socket.id);
+    if (conn && conn.partnerId === partnerId) {
+      conn.lastActivity = Date.now();
+      io.to(partnerId).emit('signal', { senderId: socket.id, signal });
+
+      const partnerConn = activeConnections.get(partnerId);
+      if (partnerConn) partnerConn.lastActivity = Date.now();
     }
   });
 
   socket.on('next', ({ chatType }) => {
-    console.log(`User ${socket.id} clicked next`);
-    
-    // Get current connection
-    const connection = activeConnections.get(socket.id);
-    if (!connection) {
-      // If no connection, just search for a new partner
-      socket.emit('readyForNext');
-      socket.emit('findPartner', { chatType });
-      return;
-    }
-    
-    const { partnerId } = connection;
-    
-    // Notify partner they'll need to find someone new
-    if (isSocketValid(partnerId)) {
-      io.to(partnerId).emit('partnerLeft');
-    }
-    
-    // Clean up the connections
-    activeConnections.delete(socket.id);
-    activeConnections.delete(partnerId);
-    
-    // For the user who clicked next, immediately try to find new partner
-    waitingUsers[chatType].add(socket.id);
-    socket.emit('readyForNext');
-    matchPartner(socket, chatType);
-    
-    // For the partner, only add back to queue if they're still connected
-    if (isSocketValid(partnerId)) {
-      waitingUsers[chatType].add(partnerId);
-      
-      // Let the partner know they can look for a new match
-      io.to(partnerId).emit('readyForNext');
-      
-      // Get partner's socket and try to match them
-      const partnerSocket = io.sockets.sockets.get(partnerId);
-      if (partnerSocket) {
-        setTimeout(() => {
-          if (waitingUsers[chatType].has(partnerId) && !activeConnections.has(partnerId)) {
-            matchPartner(partnerSocket, chatType);
-          }
-        }, 1000); // Small delay to ensure resources are freed
-      }
-    }
-  });
+    console.log(`Next clicked by ${socket.id}`);
+    const conn = activeConnections.get(socket.id);
+    if (conn) {
+      const partnerId = conn.partnerId;
 
-  // Helper function to clean up a user's connections
-  function cleanupUserConnections(userId) {
-    // Remove from any waiting queues
-    Object.values(waitingUsers).forEach(queue => queue.delete(userId));
-    
-    // Check if user has an active connection
-    const connection = activeConnections.get(userId);
-    if (connection) {
-      const { partnerId, chatType } = connection;
-      
-      // Notify partner
-      if (isSocketValid(partnerId)) {
-        io.to(partnerId).emit('partnerLeft');
-      }
-      
-      // Clean up both connections
-      activeConnections.delete(userId);
-      activeConnections.delete(partnerId);
-    }
-  }
-
-  socket.on('disconnect', () => {
-    console.log('User disconnected:', socket.id);
-    
-    // Remove from waiting queues
-    Object.values(waitingUsers).forEach(queue => queue.delete(socket.id));
-    
-    // Handle active connection
-    const connection = activeConnections.get(socket.id);
-    if (connection) {
-      const { partnerId, chatType } = connection;
-      
-      // Notify partner
-      if (isSocketValid(partnerId)) {
-        io.to(partnerId).emit('partnerLeft');
-        
-        // Add partner back to waiting queue if they want to find someone new
-        waitingUsers[chatType].add(partnerId);
-        io.to(partnerId).emit('readyForNext');
-        
-        // Try to match partner with someone else
-        const partnerSocket = io.sockets.sockets.get(partnerId);
-        if (partnerSocket) {
-          setTimeout(() => {
-            if (waitingUsers[chatType].has(partnerId) && !activeConnections.has(partnerId)) {
-              matchPartner(partnerSocket, chatType);
-            }
-          }, 1000);
-        }
-      }
-      
-      // Remove both connections
       activeConnections.delete(socket.id);
       activeConnections.delete(partnerId);
+
+      if (isConnected(partnerId)) {
+        io.to(partnerId).emit('partnerLeft');
+        waitingUsers[chatType].add(partnerId);
+        const partnerSocket = io.sockets.sockets.get(partnerId);
+        if (partnerSocket) setTimeout(() => tryMatch(partnerSocket, chatType), 1000);
+      }
     }
+
+    waitingUsers[chatType].add(socket.id);
+    socket.emit('readyForNext');
+    tryMatch(socket, chatType);
+  });
+
+  socket.on('disconnect', () => {
+    console.log("User disconnected:", socket.id);
+    cleanup(socket.id);
+  });
+
+  function cleanup(id) {
+    Object.values(waitingUsers).forEach(q => q.delete(id));
+    const conn = activeConnections.get(id);
+    if (conn) {
+      const { partnerId, type } = conn;
+      activeConnections.delete(id);
+      activeConnections.delete(partnerId);
+
+      if (isConnected(partnerId)) {
+        io.to(partnerId).emit('partnerLeft');
+        waitingUsers[type].add(partnerId);
+        const partnerSocket = io.sockets.sockets.get(partnerId);
+        if (partnerSocket) setTimeout(() => tryMatch(partnerSocket, type), 1000);
+      }
+    }
+  }
+});
+
+app.get('/status', (req, res) => {
+  res.json({
+    activeConnections: activeConnections.size / 2,
+    waitingText: waitingUsers.text.size,
+    waitingVideo: waitingUsers.video.size,
+    uptime: process.uptime()
   });
 });
 
 const PORT = process.env.PORT || 5001;
-server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
-
-// Route to check server status
-app.get('/status', (req, res) => {
-  const stats = {
-    connections: activeConnections.size / 2, // Divide by 2 since each connection is stored twice
-    waitingText: waitingUsers.text.size,
-    waitingVideo: waitingUsers.video.size,
-    uptime: process.uptime()
-  };
-  res.json(stats);
-});
+server.listen(PORT, () => console.log(`Server running on port ${PORT}`));

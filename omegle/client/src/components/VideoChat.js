@@ -863,26 +863,28 @@ const VideoChat = ({ partnerId, onNext, socket }) => {
   const [error, setError] = useState(null);
   const [isWaiting, setIsWaiting] = useState(true);
   const [isChatExpanded, setIsChatExpanded] = useState(false);
-  const messagesEndRef = useRef();
+
   const localVideoRef = useRef();
   const remoteVideoRef = useRef();
+  const messagesEndRef = useRef();
 
-  // Initialize media stream
   useEffect(() => {
     let mounted = true;
-    const initializeStream = async () => {
+
+    const initStream = async () => {
       try {
         const mediaStream = await navigator.mediaDevices.getUserMedia({
           video: { width: { ideal: 1280 }, height: { ideal: 720 } },
           audio: true,
         });
+
         if (mounted) {
           setStream(mediaStream);
           if (localVideoRef.current) {
             localVideoRef.current.srcObject = mediaStream;
             localVideoRef.current.muted = true;
-            localVideoRef.current.play().catch(err => {
-              setError('Error playing local video');
+            localVideoRef.current.play().catch(() => {
+              setError('Error playing local video.');
             });
           }
           setIsStreamReady(true);
@@ -892,196 +894,144 @@ const VideoChat = ({ partnerId, onNext, socket }) => {
         setError('Error accessing camera/microphone.');
       }
     };
-    initializeStream();
+
+    initStream();
 
     return () => {
       mounted = false;
-      if (stream) {
-        stream.getTracks().forEach(track => track.stop());
-      }
+      stream?.getTracks().forEach(track => track.stop());
     };
   }, []);
 
-  // Initialize peer connection
   useEffect(() => {
     if (!stream || !partnerId || !isStreamReady) return;
 
     setIsWaiting(false);
-    const newPeer = new Peer({
-      initiator: true,
-      trickle: false,
-      stream,
-    });
 
-    newPeer.on('signal', data => {
-      socket.emit('signal', { partnerId, signal: data });
+    const newPeer = new Peer({ initiator: true, trickle: false, stream });
+
+    newPeer.on('signal', signal => {
+      socket.emit('signal', { partnerId, signal });
     });
 
     newPeer.on('stream', remoteStream => {
-      const remoteVideo = remoteVideoRef.current;
-      if (remoteVideo) {
-        remoteVideo.srcObject = remoteStream;
-        remoteVideo.play().catch(err => setError('Error playing remote video.'));
+      if (remoteVideoRef.current) {
+        remoteVideoRef.current.srcObject = remoteStream;
+        remoteVideoRef.current.play().catch(() => {
+          setError('Error playing remote video.');
+        });
       }
     });
 
     newPeer.on('connect', () => setIsConnected(true));
-    newPeer.on('error', () => setError('Error establishing video connection.'));
+    newPeer.on('error', () => setError('Error establishing connection.'));
     newPeer.on('close', () => setIsConnected(false));
 
     setPeer(newPeer);
 
-    return () => {
-      if (newPeer) {
-        newPeer.destroy();
-      }
-    };
+    return () => newPeer.destroy();
   }, [stream, partnerId, socket, isStreamReady]);
 
-  // Handle incoming signals
   useEffect(() => {
-    if (!stream || !partnerId || !isStreamReady) return;
+    if (!peer) return;
 
-    const handleSignal = (data) => {
-      if (data.senderId === partnerId && peer) {
-        peer.signal(data.signal);
-      }
+    const handleSignal = ({ senderId, signal }) => {
+      if (senderId === partnerId) peer.signal(signal);
     };
+
     socket.on('signal', handleSignal);
+    return () => socket.off('signal', handleSignal);
+  }, [peer, partnerId, socket]);
 
-    return () => {
-      socket.off('signal', handleSignal);
-    };
-  }, [stream, partnerId, peer, socket, isStreamReady]);
-
-  // Handle incoming messages
   useEffect(() => {
-    const handleMessage = (data) => {
-      if (data.senderId === partnerId) {
-        setMessages(prev => [...prev, { text: data.message, sender: data.senderId }]);
+    const handleMessage = ({ senderId, message }) => {
+      if (senderId === partnerId) {
+        setMessages(prev => [...prev, { text: message, sender: senderId }]);
       }
     };
     socket.on('message', handleMessage);
-
-    return () => {
-      socket.off('message', handleMessage);
-    };
+    return () => socket.off('message', handleMessage);
   }, [partnerId, socket]);
 
-  // Auto-scroll to bottom of messages
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  // Handle partner left
   useEffect(() => {
     const handlePartnerLeft = () => {
-      setError('Partner disconnected. Finding a new partner...');
+      setError('Partner disconnected. Finding new partner...');
       setIsWaiting(true);
     };
-    
+
     socket.on('partnerLeft', handlePartnerLeft);
-    
-    return () => {
-      socket.off('partnerLeft', handlePartnerLeft);
-    };
+    return () => socket.off('partnerLeft', handlePartnerLeft);
   }, [socket]);
 
   const handleNext = () => {
-    if (peer) {
-      peer.destroy();
-    }
-    if (stream) {
-      stream.getTracks().forEach(track => track.stop());
-    }
-    setIsWaiting(true);
+    peer?.destroy();
+    stream?.getTracks().forEach(track => track.stop());
     setMessages([]);
+    setIsWaiting(true);
     onNext();
   };
 
   const sendMessage = (e) => {
     e.preventDefault();
-    if (message.trim() && partnerId) {
-      socket.emit('message', { partnerId, message });
-      setMessages(prev => [...prev, { text: message, sender: socket.id }]);
-      setMessage('');
-    }
+    if (!message.trim()) return;
+    socket.emit('message', { partnerId, message });
+    setMessages(prev => [...prev, { text: message, sender: socket.id }]);
+    setMessage('');
   };
 
-  const toggleChat = () => {
-    setIsChatExpanded(!isChatExpanded);
-  };
+  const toggleChat = () => setIsChatExpanded(prev => !prev);
 
   if (!isStreamReady) {
     return (
-      <div className="flex flex-col items-center justify-center min-h-screen bg-gray-900 text-white">
-        <div className="animate-spin rounded-full h-16 w-16 border-t-2 border-b-2 border-blue-500"></div>
-        <p className="mt-4 text-xl">Setting up video...</p>
+      <div className="flex items-center justify-center h-screen bg-gray-900 text-white">
+        <div className="text-center">
+          <div className="animate-spin h-16 w-16 border-t-4 border-b-4 border-blue-500 rounded-full mx-auto" />
+          <p className="mt-4 text-xl">Setting up video...</p>
+        </div>
       </div>
     );
   }
 
   if (isWaiting) {
     return (
-      <div className="flex flex-col items-center justify-center min-h-screen bg-gray-900 text-white">
-        <div className="animate-spin rounded-full h-16 w-16 border-t-2 border-b-2 border-blue-500"></div>
+      <div className="flex flex-col items-center justify-center h-screen bg-gray-900 text-white">
+        <div className="animate-spin h-16 w-16 border-t-4 border-b-4 border-blue-500 rounded-full" />
         <p className="mt-4 text-xl">Waiting for a stranger...</p>
-        <p className="mt-2 text-gray-400">Keep this tab active</p>
+        <p className="mt-2 text-sm text-gray-400">Keep this tab active</p>
       </div>
     );
   }
 
   return (
-    <div className="flex flex-col h-screen bg-gray-900">
-      {/* Header */}
-      <div className="bg-gray-800 shadow-md p-4">
-        <div className="flex justify-between items-center max-w-7xl mx-auto">
-          <h2 className="text-xl font-semibold text-white flex items-center">
-            <span className="hidden sm:inline">Video Chat</span>
-            {isConnected && (
-              <span className="ml-3 inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
-                <span className="w-2 h-2 mr-1 bg-green-500 rounded-full"></span>
-                Connected
-              </span>
-            )}
-          </h2>
-          <div className="flex items-center gap-2 sm:gap-4">
-            {error && (
-              <span className="text-red-400 text-sm hidden sm:inline">{error}</span>
-            )}
-            <button
-              onClick={toggleChat}
-              className="md:hidden bg-blue-500 hover:bg-blue-600 text-white px-3 py-1 rounded"
-            >
-              {isChatExpanded ? 'Video' : 'Chat'}
-            </button>
-            <button
-              onClick={handleNext}
-              className="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded flex items-center"
-            >
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-1" viewBox="0 0 20 20" fill="currentColor">
-                <path fillRule="evenodd" d="M10.293 5.293a1 1 0 011.414 0l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414-1.414L12.586 11H5a1 1 0 110-2h7.586l-2.293-2.293a1 1 0 010-1.414z" clipRule="evenodd" />
-              </svg>
-              <span className="hidden sm:inline">Next</span>
-            </button>
-          </div>
+    <div className="flex flex-col h-screen bg-gray-900 text-white">
+      <header className="bg-gray-800 p-4 flex justify-between items-center">
+        <div className="flex items-center gap-4">
+          <h2 className="text-xl font-semibold">Video Chat</h2>
+          {isConnected && (
+            <span className="bg-green-600 text-xs px-2 py-1 rounded-full">Connected</span>
+          )}
         </div>
-      </div>
+        <div className="flex gap-2">
+          <button onClick={toggleChat} className="md:hidden bg-blue-600 px-3 py-1 rounded">
+            {isChatExpanded ? 'Video' : 'Chat'}
+          </button>
+          <button onClick={handleNext} className="bg-red-600 px-4 py-2 rounded">Next</button>
+        </div>
+      </header>
 
-      {/* Main Content */}
-      <div className="flex-1 flex flex-col md:flex-row">
-        {/* Video Section - Hidden on mobile when chat is expanded */}
-        <div className={`${isChatExpanded ? 'hidden md:flex' : 'flex'} flex-1 relative bg-black`}>
-          {/* Remote Video */}
+      <div className="flex flex-1 flex-col md:flex-row">
+        <div className={`${isChatExpanded ? 'hidden md:flex' : 'flex'} flex-1 bg-black relative`}>
           <video
             ref={remoteVideoRef}
             autoPlay
             playsInline
-            className="absolute inset-0 w-full h-full object-cover"
+            className="absolute w-full h-full object-cover"
           />
-          
-          {/* Local Video */}
-          <div className="absolute bottom-4 right-4 w-24 h-36 sm:w-40 sm:h-60 rounded-lg overflow-hidden shadow-lg bg-gray-800 border border-gray-700">
+          <div className="absolute bottom-4 right-4 w-28 h-44 sm:w-40 sm:h-60 bg-gray-800 border border-gray-700 rounded overflow-hidden">
             <video
               ref={localVideoRef}
               autoPlay
@@ -1090,40 +1040,25 @@ const VideoChat = ({ partnerId, onNext, socket }) => {
               className="w-full h-full object-cover"
             />
           </div>
-          
-          {/* Mobile error display */}
           {error && (
-            <div className="absolute top-0 left-0 right-0 bg-red-500 bg-opacity-80 text-white text-center py-1 text-sm md:hidden">
-              {error}
-            </div>
+            <div className="absolute top-0 w-full bg-red-500 text-center p-2 text-sm">{error}</div>
           )}
         </div>
 
-        {/* Chat Section - Full screen on mobile when expanded */}
-        <div className={`${!isChatExpanded ? 'hidden md:flex' : 'flex'} md:w-80 lg:w-96 bg-gray-800 border-l border-gray-700 flex flex-col text-white`}>
-          <div className="p-3 border-b border-gray-700 bg-gray-800">
-            <h3 className="font-medium">Chat Messages</h3>
-          </div>
-          
+        <div className={`${!isChatExpanded ? 'hidden md:flex' : 'flex'} md:w-80 lg:w-96 flex-col bg-gray-800 border-l border-gray-700`}>
+          <div className="p-3 border-b border-gray-700 font-semibold">Chat</div>
           <div className="flex-1 overflow-y-auto p-4 bg-gray-900">
             {messages.length === 0 ? (
-              <div className="text-center text-gray-500 mt-8">
-                <p>No messages yet</p>
-                <p className="text-sm mt-2">Say hello to start the conversation!</p>
-              </div>
+              <p className="text-gray-500 text-center mt-8">No messages yet.</p>
             ) : (
-              messages.map((msg, index) => (
+              messages.map((msg, idx) => (
                 <div
-                  key={index}
-                  className={`mb-4 ${msg.sender === partnerId ? 'text-left' : 'text-right'}`}
+                  key={idx}
+                  className={`mb-2 ${msg.sender === partnerId ? 'text-left' : 'text-right'}`}
                 >
-                  <div
-                    className={`inline-block p-3 rounded-lg max-w-xs sm:max-w-sm break-words ${
-                      msg.sender === partnerId
-                        ? 'bg-gray-700 text-gray-100'
-                        : 'bg-blue-600 text-white'
-                    }`}
-                  >
+                  <div className={`inline-block px-4 py-2 rounded-lg max-w-xs ${
+                    msg.sender === partnerId ? 'bg-gray-700' : 'bg-blue-600'
+                  }`}>
                     {msg.text}
                   </div>
                 </div>
@@ -1131,26 +1066,15 @@ const VideoChat = ({ partnerId, onNext, socket }) => {
             )}
             <div ref={messagesEndRef} />
           </div>
-
-          <form onSubmit={sendMessage} className="p-3 border-t border-gray-700 bg-gray-800">
-            <div className="flex items-center">
-              <input
-                type="text"
-                value={message}
-                onChange={(e) => setMessage(e.target.value)}
-                placeholder="Type a message..."
-                className="flex-1 bg-gray-700 border border-gray-600 rounded-l-lg px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 text-white"
-              />
-              <button
-                type="submit"
-                className="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded-r-lg"
-              >
-                <span className="hidden sm:inline">Send</span>
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 sm:hidden" viewBox="0 0 20 20" fill="currentColor">
-                  <path d="M10.894 2.553a1 1 0 00-1.788 0l-7 14a1 1 0 001.169 1.409l5-1.429A1 1 0 009 15.571V11a1 1 0 112 0v4.571a1 1 0 00.725.962l5 1.428a1 1 0 001.17-1.408l-7-14z" />
-                </svg>
-              </button>
-            </div>
+          <form onSubmit={sendMessage} className="flex p-3 border-t border-gray-700 bg-gray-800">
+            <input
+              type="text"
+              value={message}
+              onChange={(e) => setMessage(e.target.value)}
+              placeholder="Type a message..."
+              className="flex-1 px-3 py-2 bg-gray-700 rounded-l-lg outline-none"
+            />
+            <button type="submit" className="bg-blue-600 px-4 py-2 rounded-r-lg">Send</button>
           </form>
         </div>
       </div>
@@ -1159,6 +1083,3 @@ const VideoChat = ({ partnerId, onNext, socket }) => {
 };
 
 export default VideoChat;
-
-
-

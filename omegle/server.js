@@ -33,33 +33,44 @@ io.on('connection', (socket) => {
   // Handle user joining the queue
   socket.on('findPartner', (data) => {
     const { chatType } = data;
-    console.log(`User ${socket.id} joining ${chatType} queue`);
-    
-    // Add user to appropriate queue
+    console.log(`User ${socket.id} attempting to join ${chatType} queue`);
+  
+    // If user is already connected or in queue, do nothing
+    if (activeConnections.has(socket.id)) {
+      console.log(`User ${socket.id} is already in an active connection.`);
+      return;
+    }
+  
+    if (waitingUsers[chatType].has(socket.id)) {
+      console.log(`User ${socket.id} is already in the ${chatType} queue.`);
+      return;
+    }
+  
+    // Add user to the queue
     waitingUsers[chatType].add(socket.id);
-    
+    console.log(`User ${socket.id} added to ${chatType} queue`);
+  
     // Try to find a partner
-    if (waitingUsers[chatType].size >= 2) {
-      const users = Array.from(waitingUsers[chatType]);
-      const user1 = users[0];
-      const user2 = users[1];
-      
-      // Remove both users from queue
-      waitingUsers[chatType].delete(user1);
-      waitingUsers[chatType].delete(user2);
-      
+    const users = Array.from(waitingUsers[chatType]);
+    const availablePartner = users.find(id => id !== socket.id && !activeConnections.has(id));
+  
+    if (availablePartner) {
+      // Remove both users from the queue
+      waitingUsers[chatType].delete(socket.id);
+      waitingUsers[chatType].delete(availablePartner);
+  
       // Store the connection
-      activeConnections.set(user1, { partnerId: user2, chatType });
-      activeConnections.set(user2, { partnerId: user1, chatType });
-      
-      console.log(`Matched users: ${user1} and ${user2}`);
-      
+      activeConnections.set(socket.id, { partnerId: availablePartner, chatType });
+      activeConnections.set(availablePartner, { partnerId: socket.id, chatType });
+  
+      console.log(`Matched users: ${socket.id} and ${availablePartner}`);
+  
       // Notify both users
-      io.to(user1).emit('partnerFound', { partnerId: user2, chatType });
-      io.to(user2).emit('partnerFound', { partnerId: user1, chatType });
+      io.to(socket.id).emit('partnerFound', { partnerId: availablePartner, chatType });
+      io.to(availablePartner).emit('partnerFound', { partnerId: socket.id, chatType });
     }
   });
-
+  
   // Handle text messages
   socket.on('message', (data) => {
     const { partnerId, message } = data;

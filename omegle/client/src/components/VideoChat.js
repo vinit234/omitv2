@@ -635,7 +635,13 @@ const VideoChat = ({ partnerId, onNext, socket }) => {
           setStream(mediaStream);
           localVideoRef.current.srcObject = mediaStream;
           localVideoRef.current.muted = true;
-          await localVideoRef.current.play();
+          // Ensure video plays without error
+          localVideoRef.current.onloadedmetadata = () => {
+            localVideoRef.current.play().catch(err => {
+              console.error("Local video play error:", err);
+              setError('Error playing local video');
+            });
+          };
           setIsStreamReady(true);
         }
       } catch (err) {
@@ -785,9 +791,7 @@ const VideoChat = ({ partnerId, onNext, socket }) => {
           {messages.map((msg, index) => (
             <div
               key={index}
-              className={`p-2 rounded-lg max-w-xs ${
-                msg.sender === partnerId ? 'bg-gray-200 self-start' : 'bg-blue-500 text-white self-end'
-              }`}
+              className={`p-2 rounded-lg max-w-xs ${msg.sender === partnerId ? 'bg-gray-200 self-start' : 'bg-blue-500 text-white self-end'}`}
             >
               {msg.text}
             </div>
@@ -802,10 +806,7 @@ const VideoChat = ({ partnerId, onNext, socket }) => {
             className="flex-1 px-4 py-2 border rounded-l focus:outline-none"
             placeholder="Type a message..."
           />
-          <button
-            type="submit"
-            className="bg-blue-500 text-white px-4 py-2 rounded-r hover:bg-blue-600"
-          >
+          <button type="submit" className="bg-blue-500 text-white px-4 py-2 rounded-r hover:bg-blue-600">
             Send
           </button>
         </form>
